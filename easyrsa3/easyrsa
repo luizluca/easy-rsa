@@ -232,7 +232,7 @@ die() {
 Easy-RSA error:
 
 $1" 1>&2
-	prog_exit "${2:-1}"
+	exit "${2:-1}"
 } # => die()
 
 # non-fatal warning output
@@ -289,18 +289,12 @@ mk_temp() {
 	eval "$1='$tmpfile'"
 } # => mk_temp
 
-# remove temp files
-clean_temp() {
+# remove temp files and do terminal cleanups
+cleanup() {
 	[ -z "$EASYRSA_TEMP_DIR_session" ] || rm -rf "$EASYRSA_TEMP_DIR_session"
-} # => clean_temp()
-
-prog_exit() {
-	ESTAT=0
-	[ ! -z "$1" ] && ESTAT=$1
-	(set -o echo 2>/dev/null) || stty echo
+	(set +o echo 2>/dev/null && set -o echo 2>/dev/null) || stty echo
 	echo "" # just to get a clean line
-	exit $ESTAT
-} # => prog_exit()
+} # => cleanup()
 
 easyrsa_safessl() {
 	openssl_command=$1; shift
@@ -1343,8 +1337,13 @@ done
 # Intelligent env-var detection and auto-loading:
 vars_setup
 
-# Register clean_temp and prog_exit on SIGHUP, SIGINT, SIGQUIT, and SIGABRT
-trap "clean_temp; prog_exit" 0 1 2 3 6
+# Register cleanup on EXIT
+trap "cleanup" EXIT
+# When SIGHUP, SIGINT, SIGQUIT, SIGABRT and SIGTERM,
+# explicitly exit to signal EXIT (non-bash shells)
+for signal in 1 2 3 6 15; do
+	trap "exit $((128+signal))" $signal
+done
 
 # determine how we were called, then hand off to the function responsible
 cmd="$1"

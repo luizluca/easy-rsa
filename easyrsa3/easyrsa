@@ -185,6 +185,8 @@ non-empty values to options are mandatory.
 General options:
 
 --batch         : set automatic (no-prompts when possible) mode
+--passin=ARG    : set -passin ARG for openssl
+--passout=ARG   : set -passout ARG for openssl
 --pki-dir=DIR   : declares the PKI directory
 --vars=FILE     : define a specific 'vars' file to use for Easy-RSA config
 
@@ -280,11 +282,16 @@ Type the word '$value' to continue, or any other input to abort."
 	exit 9
 } # => confirm()
 
+# mktemp wrapper
+mk_temp() {
+	[ -n "$EASYRSA_TEMP_DIR_session" ] || EASYRSA_TEMP_DIR_session="$(mktemp -d "$EASYRSA_TEMP_DIR/easy-rsa-$$.XXXXXX")"
+	tmpfile=$(mktemp "$EASYRSA_TEMP_DIR_session/${1:-tmp}.XXXXXX")
+	eval "$1='$tmpfile'"
+} # => mk_temp
+
 # remove temp files
 clean_temp() {
-	for f in "$EASYRSA_TEMP_CONF" "$EASYRSA_TEMP_EXT" "$EASYRSA_TEMP_FILE_2" "$EASYRSA_TEMP_FILE_3"
-	do	[ -f "$f" ] && rm "$f" 2>/dev/null
-	done
+	[ -z "$EASYRSA_TEMP_DIR_session" ] || rm -rf "$EASYRSA_TEMP_DIR_session"
 } # => clean_temp()
 
 prog_exit() {
@@ -295,35 +302,43 @@ prog_exit() {
 	exit $ESTAT
 } # => prog_exit()
 
-# Make LibreSSL safe config file from OpenSSL config file
-make_ssl_config() {
-sed	-e "s,ENV::,,g" \
-	-e "s,\$dir,$EASYRSA_PKI,g" \
-	-e "s,\$EASYRSA_PKI,$EASYRSA_PKI,g" \
-	-e "s,\$EASYRSA_CERT_EXPIRE,$EASYRSA_CERT_EXPIRE,g" \
-	-e "s,\$EASYRSA_CRL_DAYS,$EASYRSA_CRL_DAYS,g" \
-	-e "s,\$EASYRSA_DIGEST,$EASYRSA_DIGEST,g" \
-	-e "s,\$EASYRSA_KEY_SIZE,$EASYRSA_KEY_SIZE,g" \
-	-e "s,\$EASYRSA_DIGEST,$EASYRSA_DIGEST,g" \
-	-e "s,\$EASYRSA_DN,$EASYRSA_DN,g" \
-	-e "s,\$EASYRSA_REQ_COUNTRY,$EASYRSA_REQ_COUNTRY,g" \
-	-e "s,\$EASYRSA_REQ_PROVINCE,$EASYRSA_REQ_PROVINCE,g" \
-	-e "s,\$EASYRSA_REQ_CITY,$EASYRSA_REQ_CITY,g" \
-	-e "s,\$EASYRSA_REQ_ORG,$EASYRSA_REQ_ORG,g" \
-	-e "s,\$EASYRSA_REQ_OU,$EASYRSA_REQ_OU,g" \
-	-e "s,\$EASYRSA_REQ_CN,$EASYRSA_REQ_CN,g" \
-	-e "s,\$EASYRSA_REQ_EMAIL,$EASYRSA_REQ_EMAIL,g" \
-	"$EASYRSA_SSL_CONF" > "$EASYRSA_SAFE_CONF" || die "\
-Failed to update $EASYRSA_SAFE_CONF"
-} # => make_ssl_config()
+easyrsa_safessl() {
+	openssl_command=$1; shift
+
+	easyrsa_safe_conf=
+	mk_temp easyrsa_safe_conf
+
+	# Make LibreSSL safe config file from OpenSSL config file
+	sed \
+		-e "s,ENV::,,g" \
+		-e "s,\$dir,$EASYRSA_PKI,g" \
+		-e "s,\$EASYRSA_PKI,$EASYRSA_PKI,g" \
+		-e "s,\$EASYRSA_CERT_EXPIRE,$EASYRSA_CERT_EXPIRE,g" \
+		-e "s,\$EASYRSA_CRL_DAYS,$EASYRSA_CRL_DAYS,g" \
+		-e "s,\$EASYRSA_DIGEST,$EASYRSA_DIGEST,g" \
+		-e "s,\$EASYRSA_KEY_SIZE,$EASYRSA_KEY_SIZE,g" \
+		-e "s,\$EASYRSA_DIGEST,$EASYRSA_DIGEST,g" \
+		-e "s,\$EASYRSA_DN,$EASYRSA_DN,g" \
+		-e "s,\$EASYRSA_REQ_COUNTRY,$EASYRSA_REQ_COUNTRY,g" \
+		-e "s,\$EASYRSA_REQ_PROVINCE,$EASYRSA_REQ_PROVINCE,g" \
+		-e "s,\$EASYRSA_REQ_CITY,$EASYRSA_REQ_CITY,g" \
+		-e "s,\$EASYRSA_REQ_ORG,$EASYRSA_REQ_ORG,g" \
+		-e "s,\$EASYRSA_REQ_OU,$EASYRSA_REQ_OU,g" \
+		-e "s,\$EASYRSA_REQ_CN,$EASYRSA_REQ_CN,g" \
+		-e "s,\$EASYRSA_REQ_EMAIL,$EASYRSA_REQ_EMAIL,g" \
+		"$EASYRSA_SSL_CONF" > "$easyrsa_safe_conf" ||
+		die "Failed to update $easyrsa_safe_conf"
+
+	$EASYRSA_OPENSSL "$openssl_command" -config "$easyrsa_safe_conf" "$@"
+	err=$?
+	rm -f "$easyrsa_safe_conf"
+	return $err
+} # => easyrsa_safessl
 
 vars_source_check() {
 	# Check for defined EASYRSA_PKI
 	[ -n "$EASYRSA_PKI" ] || die "\
 EASYRSA_PKI env-var undefined"
-
-	# make safessl-easyrsa.cnf
-	make_ssl_config
 
 	# Verify EASYRSA_OPENSSL command gives expected output
 	if [ -z "$EASYRSA_SSL_OK" ]; then
@@ -396,7 +411,7 @@ verify_ca_init() {
 	verify_pki_init
 
 	# verify expected files present:
-	for i in serial index.txt ca.crt private/ca.key; do
+	for i in serial index.txt index.txt.attr ca.crt private/ca.key; do
 		if [ ! -f "$EASYRSA_PKI/$i" ]; then
 			[ "$1" = "test" ] && return 1
 			die "\
@@ -465,7 +480,6 @@ build_ca() {
 	sub_ca=""
 	nopass=""
 	crypto="-aes256"
-	crypto_opts=""
 	while [ -n "$1" ]; do
 		case "$1" in
 			subca) sub_ca=1 ;;
@@ -507,18 +521,20 @@ current CA keypair. If you intended to start a new CA, run init-pki first."
 		mkdir -p "$EASYRSA_PKI/$i" || die "$err_file"
 	done
 	printf "" > "$EASYRSA_PKI/index.txt" || die "$err_file"
+	printf "" > "$EASYRSA_PKI/index.txt.attr" || die "$err_file"
 	print "01" > "$EASYRSA_PKI/serial" || die "$err_file"
 
 	# Default CN only when not in global EASYRSA_BATCH mode:
 	# shellcheck disable=SC2015
 	[ "$EASYRSA_BATCH" ] && opts="$opts -batch" || export EASYRSA_REQ_CN="Easy-RSA CA"
 
-	out_key_tmp="$(mktemp "$out_key.XXXXXXXXXX")"; EASYRSA_TEMP_FILE_2="$out_key_tmp"
-	out_file_tmp="$(mktemp "$out_file.XXXXXXXXXX")"; EASYRSA_TEMP_FILE_3="$out_file_tmp"
+	out_key_tmp=; out_file_tmp=
+	mk_temp out_key_tmp
+	mk_temp out_file_tmp
 	# Get password from user if necessary
-	if [ ! $nopass ]; then
-		out_key_pass_tmp="$(mktemp)"; EASYRSA_TEMP_FILE_3="$out_key_pass_tmp"
-		echo
+	if [ ! $nopass ] && [ -z "$EASYRSA_PASSOUT" ] || [ -z "$EASYRSA_PASSIN" ]; then
+		out_key_pass_tmp=
+		mk_temp out_key_pass_tmp
 		printf "Enter New CA Key Passphrase: "
 		hide_read_pass kpass
 		echo
@@ -534,28 +550,33 @@ current CA keypair. If you intended to start a new CA, run init-pki first."
 	fi
 
 	# create the CA key using AES256
-	[ ! $nopass ] && crypto_opts="$crypto -passout file:$out_key_pass_tmp"
+	crypto_opts=""
+	if [ ! $nopass ]; then
+		crypto_opts="$crypto"
+		[ -z "$EASYRSA_PASSOUT" ] && crypto_opts="$crypto_opts -passout file:$out_key_pass_tmp"
+	fi
 	if [ "$EASYRSA_ALGO" = "rsa" ]; then
 		#shellcheck disable=SC2086
-		"$EASYRSA_OPENSSL" genrsa -out "$out_key_tmp" $crypto_opts "$EASYRSA_ALGO_PARAMS"
+		"$EASYRSA_OPENSSL" genrsa -out "$out_key_tmp" $crypto_opts ${EASYRSA_PASSOUT:+-passout "$EASYRSA_PASSOUT"} "$EASYRSA_ALGO_PARAMS" || \
+			die "Failed create CA private key"
 	elif [ "$EASYRSA_ALGO" = "ec" ]; then
 		#shellcheck disable=SC2086
 		"$EASYRSA_OPENSSL" ecparam -in "$EASYRSA_ALGO_PARAMS" -genkey | \
-			"$EASYRSA_OPENSSL" ec -out "$out_key_tmp" $crypto_opts
+			"$EASYRSA_OPENSSL" ec -out "$out_key_tmp" $crypto_opts ${EASYRSA_PASSOUT:+-passout "$EASYRSA_PASSOUT"} || \
+			die "Failed create CA private key"
 	fi
 
-	# make safessl-easyrsa.cnf
-	make_ssl_config
-
 	# create the CA keypair:
-	[ ! $nopass ] && crypto_opts="-passin file:$out_key_pass_tmp"
+	crypto_opts=""
+	[ ! $nopass ] && [ -z "$EASYRSA_PASSIN" ] && crypto_opts="-passin file:$out_key_pass_tmp"
+
 	#shellcheck disable=SC2086
-	"$EASYRSA_OPENSSL" req -utf8 -new -key "$out_key_tmp" \
-		-config "$EASYRSA_SAFE_CONF" -keyout "$out_key_tmp" -out "$out_file_tmp" $crypto_opts $opts || \
+	easyrsa_safessl req -utf8 -new -key "$out_key_tmp" \
+		-keyout "$out_key_tmp" -out "$out_file_tmp" $crypto_opts $opts ${EASYRSA_PASSIN:+-passin "$EASYRSA_PASSIN"} || \
 		die "Failed to build the CA"
 
-	mv "$out_key_tmp" "$out_key"; EASYRSA_TEMP_FILE_2=
-	mv "$out_file_tmp" "$out_file"; EASYRSA_TEMP_FILE_3=
+	mv "$out_key_tmp" "$out_key"
+	mv "$out_file_tmp" "$out_file"
 	[ -f "$out_key_pass_tmp" ] && rm "$out_key_pass_tmp"
 
 	# Success messages
@@ -634,27 +655,28 @@ $EASYRSA_EXTRA_EXTS"
 	{ while ( getline<"/dev/stdin" ) {print} next }
  {print}
 }'
+		conf_tmp=
+		mk_temp conf_tmp
 		print "$extra_exts" | \
 			awk "$awkscript" "$EASYRSA_SSL_CONF" \
-			> "$EASYRSA_TEMP_CONF" \
+			> "$conf_tmp" \
 			|| die "Copying SSL config to temp file failed"
 		# Use this new SSL config for the rest of this function
-		EASYRSA_SSL_CONF="$EASYRSA_TEMP_CONF"
+		EASYRSA_SSL_CONF="$conf_tmp"
 	fi
 
-	# make safessl-easyrsa.cnf
-	make_ssl_config
-
-	key_out_tmp="$(mktemp "$key_out.XXXXXXXXXX")"; EASYRSA_TEMP_FILE_2="$key_out_tmp"
-	req_out_tmp="$(mktemp "$req_out.XXXXXXXXXX")"; EASYRSA_TEMP_FILE_3="$req_out_tmp"
+	key_out_tmp=; req_out_tmp=
+	mk_temp key_out_tmp
+	mk_temp req_out_tmp
 	# generate request
 	[ $EASYRSA_BATCH ] && opts="$opts -batch"
 	# shellcheck disable=SC2086
-	"$EASYRSA_OPENSSL" req -utf8 -new -newkey "$EASYRSA_ALGO":"$EASYRSA_ALGO_PARAMS" \
-		-config "$EASYRSA_SAFE_CONF" -keyout "$key_out_tmp" -out "$req_out_tmp" $opts \
+	easyrsa_safessl req -utf8 -new -newkey "$EASYRSA_ALGO":"$EASYRSA_ALGO_PARAMS" \
+		-keyout "$key_out_tmp" -out "$req_out_tmp" $opts ${EASYRSA_PASSOUT:+-passout "$EASYRSA_PASSOUT"} \
 		|| die "Failed to generate request"
-	mv "$key_out_tmp" "$key_out"; EASYRSA_TEMP_FILE_2=
-	mv "$req_out_tmp" "$req_out"; EASYRSA_TEMP_FILE_3=
+	mv "$key_out_tmp" "$key_out"
+	mv "$req_out_tmp" "$req_out"
+	[ -z "$conf_tmp" ] || rm -f "$conf_tmp"
 	notice "\
 Keypair and certificate request completed. Your files are:
 req: $req_out
@@ -718,10 +740,12 @@ source or that you have verified the request checksum with the sender.
 
 Request subject, to be signed as a $crt_type certificate for $EASYRSA_CERT_EXPIRE days:
 
-$(display_dn req "$req_in")
+$(easyrsa_safessl req -in "$req_in" -noout -subject -nameopt multiline)
 "	# => confirm end
 
 	# Generate the extensions file for this cert:
+	ext_tmp=
+	mk_temp ext_tmp
 	{
 		# Append first any COMMON file (if present) then the cert-type extensions
 		cat "$EASYRSA_EXT_DIR/COMMON"
@@ -757,23 +781,23 @@ $(display_dn req "$req_in")
 		[ -n "$EASYRSA_EXTRA_EXTS" ] && print "$EASYRSA_EXTRA_EXTS"
 
 		: # needed to keep die from inherting the above test
-	} > "$EASYRSA_TEMP_EXT" || die "\
+	} > "$ext_tmp" || die "\
 Failed to create temp extension file (bad permissions?) at:
-$EASYRSA_TEMP_EXT"
-
-	# make safessl-easyrsa.cnf
-	make_ssl_config
+$ext_tmp"
 
 	# sign request
 	# shellcheck disable=SC2086
-	crt_out_tmp="$(mktemp "$crt_out.XXXXXXXXXX")"; EASYRSA_TEMP_FILE_2="$crt_out_tmp"
-	"$EASYRSA_OPENSSL" ca -utf8 -in "$req_in" -out "$crt_out_tmp" -config "$EASYRSA_SAFE_CONF" \
-		-extfile "$EASYRSA_TEMP_EXT" -days "$EASYRSA_CERT_EXPIRE" -batch $opts \
+	crt_out_tmp=
+	mk_temp crt_out_tmp
+	easyrsa_safessl ca -utf8 -in "$req_in" -out "$crt_out_tmp" \
+		-extfile "$ext_tmp" -days "$EASYRSA_CERT_EXPIRE" -batch $opts ${EASYRSA_PASSIN:+-passin "$EASYRSA_PASSIN"} \
 		|| die "signing failed (openssl output above may have more detail)"
-	mv "$crt_out_tmp" "$crt_out"; EASYRSA_TEMP_FILE_2=
+	mv "$crt_out_tmp" "$crt_out"
+	rm -f "$ext_tmp"
 	notice "\
 Certificate created at: $crt_out
 "
+	rm -f "$req_in"
 	return 0
 } # => sign_req()
 
@@ -817,7 +841,10 @@ Matching file found at: "
 	gen_req "$name" batch $req_opts
 
 	# Sign it
-	sign_req "$crt_type" "$name" batch
+	( sign_req "$crt_type" "$name" batch ) || {
+		rm -f "$req_out" "$key_out"
+		die "Failed to sign '$name'"
+	}
 
 } # => build_full()
 
@@ -830,6 +857,7 @@ revoke() {
 Error: didn't find a file base name as the first argument.
 Run easyrsa without commands for usage and command help."
 	crt_in="$EASYRSA_PKI/issued/$1.crt"
+	key_in="$EASYRSA_PKI/private/$1.key"
 
 	verify_file x509 "$crt_in" || die "\
 Unable to revoke as the input file is not a valid certificate. Unexpected
@@ -839,7 +867,7 @@ input in file: $crt_in"
 	confirm "Continue with revocation: " "yes" "
 Please confirm you wish to revoke the certificate with the following subject:
 
-$(display_dn x509 "$crt_in")
+$("$EASYRSA_OPENSSL" x509 -in "$crt_in" -noout -subject -nameopt multiline)
 "	# => confirm end
 
 	# referenced cert must exist:
@@ -847,11 +875,10 @@ $(display_dn x509 "$crt_in")
 Unable to revoke as no certificate was found. Certificate was expected
 at: $crt_in"
 
-	# make safessl-easyrsa.cnf
-	make_ssl_config
-
-	"$EASYRSA_OPENSSL" ca -utf8 -revoke "$crt_in" -config "$EASYRSA_SAFE_CONF" || die "\
+	easyrsa_safessl ca -utf8 -revoke "$crt_in" ${EASYRSA_PASSIN:+-passin "$EASYRSA_PASSIN"} || die "\
 Failed to revoke certificate: revocation command failed."
+	rm -f "$crt_in"
+	! [ -e "$key_in" ] || rm -f "$key_in"
 
 	notice "\
 IMPORTANT!!!
@@ -866,15 +893,12 @@ infrastructure in order to prevent the revoked cert from being accepted.
 gen_crl() {
 	verify_ca_init
 
-	# make safessl-easyrsa.cnf
-	make_ssl_config
-
 	out_file="$EASYRSA_PKI/crl.pem"
-	out_file_tmp="$(mktemp "$out_file.XXXXXXXXXX")"; EASYRSA_TEMP_FILE_2="$out_file_tmp"
-	"$EASYRSA_OPENSSL" ca -utf8 -gencrl -out "$out_file_tmp" -config "$EASYRSA_SAFE_CONF" || die "\
+	mk_temp out_file_tmp
+	easyrsa_safessl ca -utf8 -gencrl -out "$out_file_tmp" ${EASYRSA_PASSIN:+-passin "$EASYRSA_PASSIN"} || die "\
 CRL Generation failed.
 "
-	mv "$out_file_tmp" "$out_file"; EASYRSA_TEMP_FILE_2=
+	mv "$out_file_tmp" "$out_file"
 
 	notice "\
 An updated CRL has been created.
@@ -973,7 +997,7 @@ Missing key expected at: $key_in"
 		# export the p12:
 		# shellcheck disable=SC2086
 		"$EASYRSA_OPENSSL" pkcs12 -in "$crt_in" -inkey "$key_in" -export \
-			-out "$pkcs_out" $pkcs_opts || die "\
+			-out "$pkcs_out" $pkcs_opts ${EASYRSA_PASSIN:+-passin "$EASYRSA_PASSIN"} ${EASYRSA_PASSOUT:+-passout "$EASYRSA_PASSOUT"} || die "\
 Export of p12 failed: see above for related openssl errors."
 	;;
 	p7)
@@ -982,7 +1006,7 @@ Export of p12 failed: see above for related openssl errors."
 		# export the p7:
 		# shellcheck disable=SC2086
 		"$EASYRSA_OPENSSL" crl2pkcs7 -nocrl -certfile "$crt_in" \
-			-out "$pkcs_out" $pkcs_opts || die "\
+			-out "$pkcs_out" $pkcs_opts ${EASYRSA_PASSIN:+-passin "$EASYRSA_PASSIN"} ${EASYRSA_PASSOUT:+-passout "$EASYRSA_PASSOUT"} || die "\
 Export of p7 failed: see above for related openssl errors."
 	;;
 esac
@@ -1028,9 +1052,12 @@ $file"
 If the key is currently encrypted you must supply the decryption passphrase.
 ${crypto:+You will then enter a new PEM passphrase for this key.$NL}"
 
-	"$EASYRSA_OPENSSL" "$key_type" -in "$file" -out "$file" $crypto || die "\
+	out_key_tmp=
+	mk_temp out_key_tmp
+	"$EASYRSA_OPENSSL" "$key_type" -in "$file" -out "$out_key_tmp" "$crypto" ${EASYRSA_PASSIN:+-passin "$EASYRSA_PASSIN"} ${EASYRSA_PASSOUT:+-passout "$EASYRSA_PASSOUT"} || die "\
 Failed to change the private key passphrase. See above for possible openssl
 error messages."
+	mv "$out_key_tmp" "$file"
 
 	notice "Key passphrase successfully changed"
 	
@@ -1045,17 +1072,11 @@ Failed to perform update-db: see above for related openssl errors."
 	return 0
 } # => update_db()
 
-# display cert DN info on a req/X509, passed by full pathname
-display_dn() {
-	format="$1" path="$2"
-	print "$("$EASYRSA_OPENSSL" "$format" -in "$path" -noout -subject -nameopt multiline)"
-} # => display_dn()
-
 # generate default SAN from req/X509, passed by full pathname
 default_server_san() {
 	path="$1"
 	cn=$(
-		"$EASYRSA_OPENSSL" req -in "$path" -noout -subject -nameopt sep_multiline |
+		easyrsa_safessl req -in "$path" -noout -subject -nameopt sep_multiline |
 		awk -F'=' '/^  *CN=/{print $2}'
 		)
 	echo "$cn" | grep -E -q '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$'
@@ -1140,7 +1161,11 @@ vars_setup() {
 	vars=
 
 	# set up program path
-	prog_vars="${0%/*}/vars"
+	prog_file="$0"
+	prog_file2="$(which -- "$prog_file" 2>/dev/null)" && prog_file="$prog_file2"
+	prog_file2="$(readlink -f "$prog_file" 2>/dev/null)" && prog_file="$prog_file2"
+	prog_dir="${prog_file%/*}"
+	prog_vars="${prog_dir}/vars"
 	# set up PKI path
 	pki_vars="${EASYRSA_PKI:-$PWD/pki}/vars"
 
@@ -1170,7 +1195,7 @@ Note: using Easy-RSA configuration from: $vars"
 	fi
 	
 	# Set defaults, preferring existing env-vars if present
-	set_var EASYRSA		"${0%/*}"
+	set_var EASYRSA		"$prog_dir"
 	set_var EASYRSA_OPENSSL	openssl
 	set_var EASYRSA_PKI	"$PWD/pki"
 	set_var EASYRSA_DN	cn_only
@@ -1189,15 +1214,10 @@ Note: using Easy-RSA configuration from: $vars"
 	set_var EASYRSA_CRL_DAYS	180
 	set_var EASYRSA_NS_SUPPORT	no
 	set_var EASYRSA_NS_COMMENT	"Easy-RSA (~VER~) Generated Certificate"
-	set_var EASYRSA_TEMP_CONF	"$EASYRSA_PKI/openssl-easyrsa.temp"
-	set_var EASYRSA_TEMP_EXT	"$EASYRSA_PKI/extensions.temp"
-	set_var EASYRSA_TEMP_FILE_2	""
-	set_var EASYRSA_TEMP_FILE_3	""
+	set_var EASYRSA_TEMP_DIR	"$EASYRSA_PKI"
 	set_var EASYRSA_REQ_CN		ChangeMe
 	set_var EASYRSA_DIGEST		sha256
-
 	set_var EASYRSA_SSL_CONF	"$EASYRSA_PKI/openssl-easyrsa.cnf"
-	set_var EASYRSA_SAFE_CONF	"$EASYRSA_PKI/safessl-easyrsa.cnf"
 
 	# Same as above for the x509-types extensions dir
 	if [ -d "$EASYRSA_PKI/x509-types" ]; then
@@ -1215,9 +1235,6 @@ Note: using Easy-RSA configuration from: $vars"
 	else
 		die "Alg '$EASYRSA_ALGO' is invalid: must be 'rsa' or 'ec'"
 	fi
-
-	# Setting OPENSSL_CONF prevents bogus warnings (especially useful on win32)
-	export OPENSSL_CONF="$EASYRSA_SAFE_CONF"
 } # vars_setup()
 
 # variable assignment by indirection when undefined; merely exports
@@ -1238,6 +1255,10 @@ NL='
 
 # Be secure with a restrictive umask
 [ -z "$EASYRSA_NO_UMASK" ] && umask 077
+
+# Ignore some env vars
+EASYRSA_PASSIN=
+EASYRSA_PASSOUT=
 
 # Parse options
 while :; do
@@ -1292,6 +1313,10 @@ while :; do
 	--batch)
 		empty_ok=1
 		export EASYRSA_BATCH=1 ;;
+	--passin)
+		export EASYRSA_PASSIN="$val";;
+	--passout)
+		export EASYRSA_PASSOUT="$val";;
 	--subca-len)
 		export EASYRSA_SUBCA_LEN="$val" ;;
 	--vars)
